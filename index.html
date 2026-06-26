@@ -1,0 +1,783 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>JobBoard — MAS Project Tracker</title>
+  <link rel="manifest" href="manifest.json">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body, #root { height: 100%; }
+    body { background: #0f1117; color: #e2e8f0; font-family: 'Outfit', sans-serif; }
+    input, select, textarea, button { font-family: 'Outfit', sans-serif; }
+    ::-webkit-scrollbar { width: 6px; }
+    ::-webkit-scrollbar-track { background: #0f1117; }
+    ::-webkit-scrollbar-thumb { background: #2d3748; border-radius: 3px; }
+  </style>
+</head>
+<body>
+<div id="root"></div>
+<script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<script type="text/babel">
+const { useState, useCallback, useMemo, useEffect } = React;
+
+// ── Data ───────────────────────────────────────────────────────────────────
+
+const PHASES = [
+  { id: 'initiation',  label: 'INITIATION',        color: '#0d9488', steps: [1,2,3] },
+  { id: 'engineering', label: 'ENGINEERING',        color: '#3b82f6', steps: [4,5,6] },
+  { id: 'production',  label: 'PRODUCTION',         color: '#8b5cf6', steps: [7,8,9,10] },
+  { id: 'delivery',    label: 'DELIVERY & INSTALL', color: '#f59e0b', steps: [11,12,13,14] },
+  { id: 'closeout',    label: 'CLOSE-OUT',          color: '#22c55e', steps: [15,16] },
+];
+
+const STEP_PHASE = {};
+PHASES.forEach(ph => ph.steps.forEach(s => STEP_PHASE[s] = ph));
+
+const STEPS = {
+  1:  { label: 'Quote',                 desc: 'Scope, pricing & proposal prepared' },
+  2:  { label: 'Quote Review',          desc: 'Customer reviews and approves scope' },
+  3:  { label: 'PO Received',           desc: 'Purchase order received, project officially started' },
+  4:  { label: 'Engineering',           desc: 'System design & engineering worksheet created' },
+  5:  { label: 'Engineering Approval',  desc: 'Design reviewed and signed off internally' },
+  6:  { label: 'Drawings',              desc: 'Wiring diagrams, panel layouts & installation plans produced' },
+  7:  { label: 'Order Materials',       desc: 'Sensors, panels, cables and all components ordered' },
+  8:  { label: 'Programming',           desc: 'Software configuration & alarm logic developed' },
+  9:  { label: 'Production',            desc: 'Panel build & full system assembly' },
+  10: { label: 'QA Testing',            desc: 'Full system verification before shipment' },
+  11: { label: 'Shipment 1',            desc: 'Main panel & primary components shipped' },
+  12: { label: 'Shipment 2',            desc: 'Sensors, accessories & remaining components shipped' },
+  13: { label: 'Installation',          desc: 'On-vessel mounting & wiring completed' },
+  14: { label: 'Commissioning',         desc: 'Live system testing & customer sign-off' },
+  15: { label: 'Eng. Worksheet Update', desc: 'As-built documentation updated to reflect final configuration' },
+  16: { label: 'Project Complete',      desc: 'All deliverables fulfilled, project closed' },
+};
+
+const T = {
+  bg: '#0f1117', card: '#161b2e', card2: '#1e2540',
+  border: '#2a3150', text: '#e2e8f0', muted: '#7c8db5',
+  accent: '#3b82f6', danger: '#ef4444', success: '#22c55e',
+};
+
+// ── Persistence ────────────────────────────────────────────────────────────
+
+function useP(key, def) {
+  const [v, _set] = useState(() => {
+    try { const s = localStorage.getItem(key); return s ? JSON.parse(s) : def; } catch { return def; }
+  });
+  const set = useCallback(nv => {
+    _set(prev => {
+      const val = typeof nv === 'function' ? nv(prev) : nv;
+      try { localStorage.setItem(key, JSON.stringify(val)); } catch {}
+      return val;
+    });
+  }, [key]);
+  return [v, set];
+}
+
+// ── Helpers ────────────────────────────────────────────────────────────────
+
+function blankStep() {
+  return { done: false, doneDate: '', assignedTo: '', dueDate: '', notes: '' };
+}
+
+function newJob(overrides = {}) {
+  const steps = {};
+  for (let i = 1; i <= 16; i++) steps[i] = blankStep();
+  return {
+    id: Date.now().toString(),
+    jobNumber: '', customer: '', vessel: '',
+    po: '', assignedTech: '', dueDate: '',
+    status: 'active', notes: '', steps,
+    createdAt: new Date().toISOString().slice(0,10),
+    ...overrides,
+  };
+}
+
+function progress(job) {
+  const done = Object.values(job.steps).filter(s => s.done).length;
+  return { done, total: 16, pct: Math.round(done / 16 * 100) };
+}
+
+function currentPhase(job) {
+  for (let i = 1; i <= 16; i++) if (!job.steps[i]?.done) return STEP_PHASE[i];
+  return PHASES[4];
+}
+
+function todayStr() { return new Date().toISOString().slice(0,10); }
+function fmt(d) {
+  if (!d) return '';
+  const [y,m,dd] = d.split('-');
+  return `${m}/${dd}/${y.slice(2)}`;
+}
+
+// ── Shared UI ──────────────────────────────────────────────────────────────
+
+const field = {
+  width: '100%', background: '#0c1020', border: `1px solid ${T.border}`,
+  borderRadius: 8, padding: '8px 12px', color: T.text, fontSize: 14, outline: 'none',
+};
+
+function Field({ label, value, onChange, type = 'text', placeholder, opts, multi, required }) {
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+      {label && (
+        <label style={{ fontSize: 12, fontWeight: 600, color: T.muted, letterSpacing: '0.04em' }}>
+          {label}{required ? ' *' : ''}
+        </label>
+      )}
+      {multi ? (
+        <textarea value={value} onChange={e => onChange(e.target.value)}
+          placeholder={placeholder} rows={3}
+          style={{ ...field, resize: 'vertical' }} />
+      ) : opts ? (
+        <select value={value} onChange={e => onChange(e.target.value)} style={field}>
+          {opts.map(o => <option key={o.v} value={o.v}>{o.l}</option>)}
+        </select>
+      ) : (
+        <input type={type} value={value} onChange={e => onChange(e.target.value)}
+          placeholder={placeholder} style={field} />
+      )}
+    </div>
+  );
+}
+
+function Btn({ children, onClick, variant = 'primary', sm, disabled }) {
+  const styles = {
+    primary: { background: T.accent, color: '#fff', border: 'none' },
+    ghost:   { background: 'transparent', color: T.muted, border: `1px solid ${T.border}` },
+    danger:  { background: T.danger + '20', color: T.danger, border: `1px solid ${T.danger}40` },
+    success: { background: T.success + '20', color: T.success, border: `1px solid ${T.success}40` },
+  };
+  return (
+    <button onClick={disabled ? undefined : onClick} style={{
+      ...styles[variant], borderRadius: 8, cursor: disabled ? 'default' : 'pointer',
+      padding: sm ? '5px 12px' : '8px 18px', fontSize: sm ? 13 : 14,
+      fontWeight: 600, opacity: disabled ? 0.5 : 1, display: 'inline-flex', alignItems: 'center', gap: 6,
+      transition: 'opacity 0.15s',
+    }}>
+      {children}
+    </button>
+  );
+}
+
+function Bar({ pct, color, h = 5 }) {
+  return (
+    <div style={{ background: T.border, borderRadius: 99, height: h, width: '100%', overflow: 'hidden' }}>
+      <div style={{ width: `${pct}%`, height: '100%', background: color, borderRadius: 99, transition: 'width 0.3s' }} />
+    </div>
+  );
+}
+
+// ── Job Card (dashboard) ───────────────────────────────────────────────────
+
+function JobCard({ job, onClick }) {
+  const prog = progress(job);
+  const phase = currentPhase(job);
+  const overdue = job.dueDate && job.dueDate < todayStr() && job.status === 'active' && prog.pct < 100;
+  const nextStep = Object.entries(job.steps).find(([, s]) => !s.done);
+
+  return (
+    <div onClick={onClick} style={{
+      background: T.card, border: `1px solid ${T.border}`, borderRadius: 12,
+      padding: '16px', cursor: 'pointer', transition: 'background 0.15s',
+      borderLeft: `3px solid ${phase.color}`,
+    }}
+    onMouseEnter={e => e.currentTarget.style.background = T.card2}
+    onMouseLeave={e => e.currentTarget.style.background = T.card}
+    >
+      {/* Top */}
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 10 }}>
+        <div>
+          <div style={{ fontSize: 11, color: T.muted, fontFamily: 'JetBrains Mono, monospace', marginBottom: 2 }}>
+            {job.jobNumber || '—'}
+          </div>
+          <div style={{ fontWeight: 700, fontSize: 15, color: T.text, lineHeight: 1.2 }}>
+            {job.customer || 'No customer'}
+          </div>
+          {job.vessel && <div style={{ fontSize: 13, color: T.muted, marginTop: 2 }}>{job.vessel}</div>}
+        </div>
+        <div style={{ textAlign: 'right' }}>
+          {job.status === 'on-hold' && (
+            <div style={{ fontSize: 11, fontWeight: 700, color: '#f59e0b', background: '#f59e0b20',
+              padding: '2px 8px', borderRadius: 99, border: '1px solid #f59e0b40', marginBottom: 4 }}>
+              ON HOLD
+            </div>
+          )}
+          <div style={{ fontSize: 12, color: overdue ? T.danger : T.muted }}>
+            {job.dueDate ? `Due ${fmt(job.dueDate)}` : 'No due date'}
+          </div>
+        </div>
+      </div>
+
+      {/* Progress */}
+      <div style={{ marginBottom: 10 }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 5 }}>
+          <span style={{ fontSize: 12, color: phase.color, fontWeight: 600 }}>{phase.label}</span>
+          <span style={{ fontSize: 12, color: T.muted, fontFamily: 'JetBrains Mono, monospace' }}>
+            {prog.done}/16
+          </span>
+        </div>
+        <Bar pct={prog.pct} color={phase.color} />
+      </div>
+
+      {/* Footer */}
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: 12, color: T.muted }}>
+        <span>{job.assignedTech || 'Unassigned'}</span>
+        {nextStep && (
+          <span>Next: {STEPS[nextStep[0]]?.label}</span>
+        )}
+        {prog.pct === 100 && (
+          <span style={{ color: T.success, fontWeight: 600 }}>✓ Complete</span>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ── Dashboard ──────────────────────────────────────────────────────────────
+
+function Dashboard({ jobs, onOpen, onNew }) {
+  const [filter, setFilter] = useState('active');
+  const [search, setSearch] = useState('');
+
+  const visible = useMemo(() => {
+    let list = jobs;
+    if (filter === 'active')   list = list.filter(j => j.status === 'active' && progress(j).pct < 100);
+    if (filter === 'complete') list = list.filter(j => j.status === 'complete' || progress(j).pct === 100);
+    if (filter === 'on-hold')  list = list.filter(j => j.status === 'on-hold');
+    if (search.trim()) {
+      const q = search.toLowerCase();
+      list = list.filter(j =>
+        j.customer.toLowerCase().includes(q) ||
+        j.jobNumber.toLowerCase().includes(q) ||
+        j.vessel.toLowerCase().includes(q)
+      );
+    }
+    return list;
+  }, [jobs, filter, search]);
+
+  const stats = useMemo(() => ({
+    active:   jobs.filter(j => j.status === 'active' && progress(j).pct < 100).length,
+    complete: jobs.filter(j => j.status === 'complete' || progress(j).pct === 100).length,
+    hold:     jobs.filter(j => j.status === 'on-hold').length,
+    overdue:  jobs.filter(j => j.dueDate && j.dueDate < todayStr() && j.status === 'active' && progress(j).pct < 100).length,
+  }), [jobs]);
+
+  return (
+    <div style={{ padding: 24, maxWidth: 1400, margin: '0 auto' }}>
+      {/* Stat chips */}
+      <div style={{ display: 'flex', gap: 12, marginBottom: 24, flexWrap: 'wrap' }}>
+        {[
+          { label: 'Active Jobs', v: stats.active, c: T.accent },
+          { label: 'Complete',    v: stats.complete, c: T.success },
+          { label: 'On Hold',     v: stats.hold, c: '#f59e0b' },
+          { label: 'Overdue',     v: stats.overdue, c: stats.overdue ? T.danger : T.muted },
+        ].map(s => (
+          <div key={s.label} style={{
+            background: T.card, border: `1px solid ${T.border}`, borderRadius: 10, padding: '12px 20px',
+            display: 'flex', flexDirection: 'column', gap: 2,
+          }}>
+            <div style={{ fontSize: 26, fontWeight: 700, color: s.c, fontFamily: 'JetBrains Mono, monospace' }}>{s.v}</div>
+            <div style={{ fontSize: 12, color: T.muted }}>{s.label}</div>
+          </div>
+        ))}
+      </div>
+
+      {/* Controls */}
+      <div style={{ display: 'flex', gap: 10, alignItems: 'center', marginBottom: 20, flexWrap: 'wrap' }}>
+        <input
+          value={search} onChange={e => setSearch(e.target.value)}
+          placeholder="Search jobs..."
+          style={{ ...field, width: 220, padding: '7px 12px' }}
+        />
+        <div style={{ display: 'flex', gap: 6 }}>
+          {['active','on-hold','complete','all'].map(f => (
+            <button key={f} onClick={() => setFilter(f)} style={{
+              background: filter === f ? T.accent : 'transparent',
+              border: `1px solid ${filter === f ? T.accent : T.border}`,
+              color: filter === f ? '#fff' : T.muted,
+              borderRadius: 8, padding: '6px 14px', cursor: 'pointer', fontSize: 13, fontWeight: 500,
+              textTransform: 'capitalize',
+            }}>{f}</button>
+          ))}
+        </div>
+        <div style={{ marginLeft: 'auto' }}>
+          <Btn onClick={onNew}>+ New Job</Btn>
+        </div>
+      </div>
+
+      {/* Job grid */}
+      {visible.length === 0 ? (
+        <div style={{ textAlign: 'center', color: T.muted, padding: '60px 0', fontSize: 15 }}>
+          {jobs.length === 0
+            ? 'No jobs yet. Click "+ New Job" to get started.'
+            : 'No jobs match this filter.'}
+        </div>
+      ) : (
+        <div style={{
+          display: 'grid',
+          gridTemplateColumns: 'repeat(auto-fill, minmax(300px, 1fr))',
+          gap: 14,
+        }}>
+          {visible.map(j => <JobCard key={j.id} job={j} onClick={() => onOpen(j)} />)}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Step Row (inside job detail) ───────────────────────────────────────────
+
+function StepRow({ num, step, phaseColor, onChange }) {
+  const [open, setOpen] = useState(false);
+  const info = STEPS[num];
+
+  function toggle() {
+    const done = !step.done;
+    onChange({ ...step, done, doneDate: done && !step.doneDate ? todayStr() : step.doneDate });
+  }
+
+  return (
+    <div style={{
+      border: `1px solid ${step.done ? phaseColor + '50' : T.border}`,
+      background: step.done ? phaseColor + '0d' : T.card,
+      borderRadius: 10, overflow: 'hidden', marginBottom: 6,
+    }}>
+      {/* Row header */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '10px 14px', cursor: 'pointer' }}
+        onClick={() => setOpen(o => !o)}
+      >
+        {/* Checkbox */}
+        <div onClick={e => { e.stopPropagation(); toggle(); }} style={{
+          width: 22, height: 22, borderRadius: 6, flexShrink: 0, cursor: 'pointer',
+          border: `2px solid ${step.done ? phaseColor : T.border}`,
+          background: step.done ? phaseColor : 'transparent',
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          transition: 'all 0.15s',
+        }}>
+          {step.done && <span style={{ color: '#fff', fontSize: 13, fontWeight: 700 }}>✓</span>}
+        </div>
+
+        {/* Step number */}
+        <div style={{
+          width: 22, height: 22, borderRadius: '50%', background: T.bg, flexShrink: 0,
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          fontSize: 11, fontWeight: 700, color: T.muted, fontFamily: 'JetBrains Mono, monospace',
+        }}>{num}</div>
+
+        {/* Label */}
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <span style={{
+            fontWeight: 600, fontSize: 14,
+            color: step.done ? T.muted : T.text,
+            textDecoration: step.done ? 'line-through' : 'none',
+          }}>{info.label}</span>
+          <span style={{ fontSize: 12, color: T.muted, marginLeft: 8 }}>{info.desc}</span>
+        </div>
+
+        {/* Assigned + due */}
+        <div style={{ display: 'flex', gap: 16, fontSize: 12, color: T.muted, flexShrink: 0, alignItems: 'center' }}>
+          {step.assignedTo && (
+            <span style={{ color: T.text, fontWeight: 500 }}>{step.assignedTo}</span>
+          )}
+          {step.dueDate && (
+            <span style={{
+              color: !step.done && step.dueDate < todayStr() ? T.danger : T.muted,
+              fontFamily: 'JetBrains Mono, monospace',
+            }}>
+              {fmt(step.dueDate)}
+            </span>
+          )}
+          {step.done && step.doneDate && (
+            <span style={{ color: T.success, fontFamily: 'JetBrains Mono, monospace' }}>
+              ✓ {fmt(step.doneDate)}
+            </span>
+          )}
+          <span style={{ color: T.muted, fontSize: 11 }}>{open ? '▲' : '▼'}</span>
+        </div>
+      </div>
+
+      {/* Expanded detail */}
+      {open && (
+        <div style={{ padding: '0 14px 14px', borderTop: `1px solid ${T.border}` }}>
+          <div style={{ height: 12 }} />
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 10, marginBottom: 10 }}>
+            <Field
+              label="Assigned to"
+              value={step.assignedTo}
+              onChange={v => onChange({ ...step, assignedTo: v })}
+              placeholder="Who's doing this"
+            />
+            <Field
+              label="Due date"
+              type="date"
+              value={step.dueDate}
+              onChange={v => onChange({ ...step, dueDate: v })}
+            />
+            <Field
+              label="Completed date"
+              type="date"
+              value={step.doneDate}
+              onChange={v => onChange({ ...step, doneDate: v })}
+            />
+          </div>
+          <Field
+            label="Notes"
+            value={step.notes}
+            onChange={v => onChange({ ...step, notes: v })}
+            placeholder="Tracking info, part numbers, blockers..."
+            multi
+          />
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Job Detail ─────────────────────────────────────────────────────────────
+
+function JobDetail({ job: initial, allJobs, setJobs, onBack }) {
+  // Keep local copy so edits feel instant
+  const [job, setJobLocal] = useState(initial);
+
+  function save(updated) {
+    setJobLocal(updated);
+    setJobs(prev => prev.map(j => j.id === updated.id ? updated : j));
+  }
+
+  function updateStep(num, step) {
+    save({ ...job, steps: { ...job.steps, [num]: step } });
+  }
+
+  function updateField(field, val) {
+    save({ ...job, [field]: val });
+  }
+
+  const prog = progress(job);
+  const phase = currentPhase(job);
+  const isComplete = prog.pct === 100;
+
+  function deleteJob() {
+    if (!confirm('Delete this job? Cannot be undone.')) return;
+    setJobs(prev => prev.filter(j => j.id !== job.id));
+    onBack();
+  }
+
+  return (
+    <div style={{ padding: 24, maxWidth: 900, margin: '0 auto' }}>
+      {/* Back */}
+      <button onClick={onBack} style={{
+        background: 'none', border: 'none', color: T.muted, cursor: 'pointer',
+        fontSize: 13, padding: 0, marginBottom: 16, display: 'flex', alignItems: 'center', gap: 4,
+      }}>← All Jobs</button>
+
+      {/* Job header */}
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 20 }}>
+        <div>
+          <div style={{ fontFamily: 'JetBrains Mono, monospace', fontSize: 13, color: T.muted, marginBottom: 4 }}>
+            {job.jobNumber || '—'}
+          </div>
+          <h1 style={{ fontSize: 24, fontWeight: 700, color: T.text, marginBottom: 4 }}>
+            {job.customer || 'Unnamed Job'}
+          </h1>
+          {job.vessel && <div style={{ color: T.muted, fontSize: 15 }}>{job.vessel}</div>}
+        </div>
+        <div style={{ display: 'flex', gap: 8 }}>
+          <Btn variant="danger" sm onClick={deleteJob}>Delete</Btn>
+        </div>
+      </div>
+
+      {/* Meta fields (inline editable) */}
+      <div style={{
+        background: T.card, border: `1px solid ${T.border}`, borderRadius: 12,
+        padding: 16, display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 14, marginBottom: 20,
+      }}>
+        <Field label="Job Number"    value={job.jobNumber}    onChange={v => updateField('jobNumber', v)}    placeholder="MAS-001" />
+        <Field label="PO Number"     value={job.po}           onChange={v => updateField('po', v)}           placeholder="PO-2026-001" />
+        <Field label="Customer"      value={job.customer}     onChange={v => updateField('customer', v)}     placeholder="Company name" required />
+        <Field label="Vessel / Site" value={job.vessel}       onChange={v => updateField('vessel', v)}       placeholder="Vessel or site name" />
+        <Field label="Lead Tech"     value={job.assignedTech} onChange={v => updateField('assignedTech', v)} placeholder="Primary technician" />
+        <Field label="Overall Due Date" value={job.dueDate}   onChange={v => updateField('dueDate', v)}      type="date" />
+        <Field label="Status" value={job.status} onChange={v => updateField('status', v)} opts={[
+          { v: 'active',    l: 'Active' },
+          { v: 'on-hold',   l: 'On Hold' },
+          { v: 'complete',  l: 'Complete' },
+          { v: 'cancelled', l: 'Cancelled' },
+        ]} />
+        <div style={{ gridColumn: '1 / -1' }}>
+          <Field label="Notes" value={job.notes} onChange={v => updateField('notes', v)}
+            placeholder="Job notes, special requirements..." multi />
+        </div>
+      </div>
+
+      {/* Progress bar */}
+      <div style={{ marginBottom: 20 }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 6 }}>
+          <span style={{ fontSize: 13, color: phase.color, fontWeight: 600 }}>
+            {isComplete ? 'ALL STEPS COMPLETE' : `Current Phase: ${phase.label}`}
+          </span>
+          <span style={{ fontSize: 13, fontFamily: 'JetBrains Mono, monospace', color: T.muted }}>
+            {prog.done} of 16 steps done ({prog.pct}%)
+          </span>
+        </div>
+        <Bar pct={prog.pct} color={phase.color} h={8} />
+      </div>
+
+      {/* Steps by phase */}
+      {PHASES.map(ph => {
+        const phDone = ph.steps.filter(s => job.steps[s]?.done).length;
+        return (
+          <div key={ph.id} style={{ marginBottom: 20 }}>
+            {/* Phase header */}
+            <div style={{
+              display: 'flex', alignItems: 'center', gap: 10, padding: '8px 14px',
+              background: ph.color + '1a', border: `1px solid ${ph.color}40`,
+              borderRadius: 10, marginBottom: 8,
+            }}>
+              <div style={{ width: 8, height: 8, borderRadius: '50%', background: ph.color }} />
+              <span style={{ fontWeight: 700, fontSize: 12, color: ph.color, letterSpacing: '0.06em' }}>
+                {ph.label}
+              </span>
+              <span style={{ marginLeft: 'auto', fontSize: 12, fontFamily: 'JetBrains Mono, monospace', color: ph.color + 'aa' }}>
+                {phDone}/{ph.steps.length}
+                {phDone === ph.steps.length && ' ✓'}
+              </span>
+            </div>
+            {/* Steps */}
+            {ph.steps.map(n => (
+              <StepRow key={n} num={n} step={job.steps[n]} phaseColor={ph.color}
+                onChange={step => updateStep(n, step)} />
+            ))}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+// ── New Job Form ───────────────────────────────────────────────────────────
+
+function NewJobForm({ onSave, onCancel }) {
+  const [form, setForm] = useState(newJob());
+  const set = f => v => setForm(x => ({ ...x, [f]: v }));
+
+  function submit() {
+    if (!form.customer.trim()) { alert('Customer name is required.'); return; }
+    onSave(form);
+  }
+
+  return (
+    <div style={{ padding: 24, maxWidth: 700, margin: '0 auto' }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 24 }}>
+        <h2 style={{ fontSize: 22, fontWeight: 700, color: T.text }}>New Job</h2>
+        <div style={{ display: 'flex', gap: 8 }}>
+          <Btn variant="ghost" sm onClick={onCancel}>Cancel</Btn>
+          <Btn sm onClick={submit}>Create Job</Btn>
+        </div>
+      </div>
+
+      <div style={{
+        background: T.card, border: `1px solid ${T.border}`, borderRadius: 12, padding: 20,
+        display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14,
+      }}>
+        <Field label="Customer Name" value={form.customer} onChange={set('customer')} placeholder="Company name" required />
+        <Field label="Vessel / Site" value={form.vessel}   onChange={set('vessel')}   placeholder="Vessel or site name" />
+        <Field label="Job Number"    value={form.jobNumber} onChange={set('jobNumber')} placeholder="MAS-001" />
+        <Field label="PO Number"     value={form.po}        onChange={set('po')}        placeholder="PO-2026-001" />
+        <Field label="Lead Tech"     value={form.assignedTech} onChange={set('assignedTech')} placeholder="Primary technician" />
+        <Field label="Due Date"      value={form.dueDate}   onChange={set('dueDate')}  type="date" />
+        <div style={{ gridColumn: '1/-1' }}>
+          <Field label="Notes" value={form.notes} onChange={set('notes')}
+            placeholder="Any special requirements or notes..." multi />
+        </div>
+      </div>
+
+      <p style={{ marginTop: 14, color: T.muted, fontSize: 13 }}>
+        You can assign people and dates to each step after creating the job.
+      </p>
+    </div>
+  );
+}
+
+// ── Calendar ───────────────────────────────────────────────────────────────
+
+function CalendarView({ jobs, onOpen }) {
+  const now = new Date();
+  const [ym, setYm] = useState({ y: now.getFullYear(), m: now.getMonth() });
+  const { y, m } = ym;
+  const MONTHS = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+  const firstDay = new Date(y, m, 1).getDay();
+  const days = new Date(y, m + 1, 0).getDate();
+
+  // Collect step due dates + job due dates for this month
+  const events = useMemo(() => {
+    const map = {};
+    const add = (d, label, color, job) => {
+      if (!map[d]) map[d] = [];
+      map[d].push({ label, color, job });
+    };
+    jobs.forEach(job => {
+      if (job.dueDate) {
+        const [jy, jm, jd] = job.dueDate.split('-').map(Number);
+        if (jy === y && jm - 1 === m) {
+          add(jd, `${job.jobNumber || job.customer} — due`, currentPhase(job).color, job);
+        }
+      }
+      Object.entries(job.steps).forEach(([n, s]) => {
+        if (s.dueDate) {
+          const [sy, sm2, sd] = s.dueDate.split('-').map(Number);
+          if (sy === y && sm2 - 1 === m) {
+            add(sd, `${job.jobNumber || job.customer}: ${STEPS[n].label}`, STEP_PHASE[n].color, job);
+          }
+        }
+      });
+    });
+    return map;
+  }, [jobs, y, m]);
+
+  function prev() { setYm(v => { let mm = v.m-1, yy = v.y; if(mm<0){mm=11;yy--;} return {y:yy,m:mm}; }); }
+  function next() { setYm(v => { let mm = v.m+1, yy = v.y; if(mm>11){mm=0;yy++;} return {y:yy,m:mm}; }); }
+
+  const cells = [];
+  for (let i = 0; i < firstDay; i++) cells.push(null);
+  for (let d = 1; d <= days; d++) cells.push(d);
+  while (cells.length % 7 !== 0) cells.push(null);
+  const isToday = d => d && y === now.getFullYear() && m === now.getMonth() && d === now.getDate();
+
+  return (
+    <div style={{ padding: 24, maxWidth: 1100, margin: '0 auto' }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 }}>
+        <h2 style={{ fontSize: 20, fontWeight: 700, color: T.text }}>{MONTHS[m]} {y}</h2>
+        <div style={{ display: 'flex', gap: 8 }}>
+          <Btn variant="ghost" sm onClick={prev}>←</Btn>
+          <Btn variant="ghost" sm onClick={() => setYm({ y: now.getFullYear(), m: now.getMonth() })}>Today</Btn>
+          <Btn variant="ghost" sm onClick={next}>→</Btn>
+        </div>
+      </div>
+
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7, 1fr)', gap: 2, marginBottom: 2 }}>
+        {['Sun','Mon','Tue','Wed','Thu','Fri','Sat'].map(d => (
+          <div key={d} style={{ textAlign: 'center', fontSize: 12, fontWeight: 600, color: T.muted, padding: '6px 0' }}>{d}</div>
+        ))}
+      </div>
+
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7, 1fr)', gap: 2 }}>
+        {cells.map((day, i) => (
+          <div key={i} style={{
+            minHeight: 100, background: day ? T.card : 'transparent',
+            border: day ? `1px solid ${isToday(day) ? T.accent : T.border}` : 'none',
+            borderRadius: 8, padding: day ? 8 : 0,
+          }}>
+            {day && (
+              <>
+                <div style={{ fontSize: 13, fontWeight: isToday(day) ? 700 : 400,
+                  color: isToday(day) ? T.accent : T.muted, marginBottom: 4 }}>
+                  {day}
+                </div>
+                {(events[day] || []).map((ev, idx) => (
+                  <div key={idx} onClick={() => onOpen(ev.job)} style={{
+                    background: ev.color + '30', border: `1px solid ${ev.color}50`,
+                    borderRadius: 4, padding: '2px 5px', marginBottom: 2,
+                    fontSize: 11, color: ev.color, cursor: 'pointer',
+                    overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontWeight: 500,
+                  }}>{ev.label}</div>
+                ))}
+              </>
+            )}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// ── App ────────────────────────────────────────────────────────────────────
+
+function App() {
+  const [jobs, setJobs] = useP('jb1_jobs', []);
+  const [view, setView] = useState('board');   // 'board' | 'calendar' | 'job' | 'new'
+  const [current, setCurrent] = useState(null);
+
+  function openJob(job) {
+    // Always get the latest version from storage
+    setCurrent(job);
+    setView('job');
+  }
+
+  // Keep current job in sync if jobs change under it (e.g. from StepRow saves)
+  useEffect(() => {
+    if (current) {
+      const latest = jobs.find(j => j.id === current.id);
+      if (latest) setCurrent(latest);
+    }
+  }, [jobs]);
+
+  const navItems = [
+    { id: 'board',    label: 'Jobs' },
+    { id: 'calendar', label: 'Calendar' },
+  ];
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', height: '100vh', background: T.bg }}>
+      {/* Nav */}
+      <div style={{
+        background: T.card, borderBottom: `1px solid ${T.border}`,
+        display: 'flex', alignItems: 'center', padding: '0 20px', height: 52, gap: 4, flexShrink: 0,
+      }}>
+        <div style={{ fontWeight: 700, fontSize: 17, color: T.text, marginRight: 20, cursor: 'pointer' }}
+          onClick={() => { setView('board'); setCurrent(null); }}>
+          <span style={{ color: T.accent }}>Job</span>Board
+        </div>
+        {navItems.map(n => (
+          <button key={n.id} onClick={() => { setView(n.id); setCurrent(null); }} style={{
+            background: view === n.id ? T.accent + '20' : 'transparent',
+            border: 'none', color: view === n.id ? T.accent : T.muted,
+            padding: '6px 14px', borderRadius: 8, cursor: 'pointer', fontSize: 14,
+            fontWeight: view === n.id ? 600 : 400,
+          }}>{n.label}</button>
+        ))}
+        <div style={{ marginLeft: 'auto', fontSize: 13, color: T.muted, fontFamily: 'JetBrains Mono, monospace' }}>
+          {jobs.length} job{jobs.length !== 1 ? 's' : ''}
+        </div>
+      </div>
+
+      {/* Body */}
+      <div style={{ flex: 1, overflow: 'auto' }}>
+        {view === 'board' && (
+          <Dashboard jobs={jobs} onOpen={openJob} onNew={() => setView('new')} />
+        )}
+        {view === 'calendar' && (
+          <CalendarView jobs={jobs} onOpen={openJob} />
+        )}
+        {view === 'job' && current && (
+          <JobDetail
+            job={current}
+            allJobs={jobs}
+            setJobs={setJobs}
+            onBack={() => { setView('board'); setCurrent(null); }}
+          />
+        )}
+        {view === 'new' && (
+          <NewJobForm
+            onSave={form => {
+              setJobs(prev => [...prev, form]);
+              setCurrent(form);
+              setView('job');
+            }}
+            onCancel={() => setView('board')}
+          />
+        )}
+      </div>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+</script>
+</body>
+</html>
